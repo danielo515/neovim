@@ -1,15 +1,17 @@
-cmake_minimum_required(VERSION 2.8.12)
-# some parsers have c++ scanner, problem?
-project(parser C) # CXX
+cmake_minimum_required(VERSION 3.16)
+project(parser C)
+
+add_compile_options(-w)
+
+file(GLOB source_files src/*.c)
 
 add_library(parser
   MODULE
-  src/parser.c
+  ${source_files}
 )
 set_target_properties(
   parser
   PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME ${PARSERLANG}
     PREFIX ""
 )
@@ -17,3 +19,5 @@ set_target_properties(
 include_directories(src)
 
 install(TARGETS parser LIBRARY DESTINATION lib/nvim/parser)
+
+# vim: set ft=cmake:
