@@ -1,33 +1,117 @@
-local helpers = require('test.functional.helpers')(after_each)
+local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
-local clear = helpers.clear
-local command = helpers.command
-local exec = helpers.exec
-local feed = helpers.feed
+
+local clear = n.clear
+local command = n.command
+local exec = n.exec
+local feed = n.feed
+local api = n.api
+local nvim_dir = n.nvim_dir
+local assert_alive = n.assert_alive
 
 before_each(clear)
 
 describe('messages', function()
   local screen
 
+  -- oldtest: Test_warning_scroll()
+  it('a warning causes scrolling if and only if it has a stacktrace', function()
+    screen = Screen.new(75, 6)
+
+    -- When the warning comes from a script, messages are scrolled so that the
+    -- stacktrace is visible.
+    -- It is a bit hard to assert the screen when sourcing a script, so skip this part.
+
+    -- When the warning does not come from a script, messages are not scrolled.
+    command('enew')
+    command('set readonly')
+    feed('u')
+    screen:expect({
+      grid = [[
+                                                                                 |
+      {1:~                                                                          }|*4
+      {19:W10: Warning: Changing a readonly file}^                                     |
+    ]],
+      timeout = 500,
+    })
+    screen:expect([[
+      ^                                                                           |
+      {1:~                                                                          }|*4
+      Already at oldest change                                                   |
+    ]])
+  end)
+
+  -- oldtest: Test_message_not_cleared_after_mode()
+  it('clearing mode does not remove message', function()
+    screen = Screen.new(60, 10)
+    exec([[
+      nmap <silent> gx :call DebugSilent('normal')<CR>
+      vmap <silent> gx :call DebugSilent('visual')<CR>
+      function DebugSilent(arg)
+          echomsg "from DebugSilent" a:arg
+      endfunction
+      set showmode
+      set cmdheight=1
+      call setline(1, ['one', 'NoSuchFile', 'three'])
+    ]])
+
+    feed('gx')
+    screen:expect([[
+      ^one                                                         |
+      NoSuchFile                                                  |
+      three                                                       |
+      {1:~                                                           }|*6
+      from DebugSilent normal                                     |
+    ]])
+
+    -- removing the mode message used to also clear the intended message
+    feed('vEgx')
+    screen:expect([[
+      ^one                                                         |
+      NoSuchFile                                                  |
+      three                                                       |
+      {1:~                                                           }|*6
+      from DebugSilent visual                                     |
+    ]])
+
+    -- removing the mode message used to also clear the error message
+    command('set cmdheight=2')
+    feed('2GvEgf')
+    screen:expect([[
+      one                                                         |
+      NoSuchFil^e                                                  |
+      three                                                       |
+      {1:~                                                           }|*5
+                                                                  |
+      {9:E447: Can't find file "NoSuchFile" in path}                  |
+    ]])
+  end)
+
   describe('more prompt', function()
     before_each(function()
-      screen = Screen.new(75, 6)
-      screen:set_default_attr_ids({
-        [0] = {bold = true, foreground = Screen.colors.Blue},  -- NonText
-        [1] = {bold = true, foreground = Screen.colors.SeaGreen},  -- MoreMsg
-        [2] = {foreground = Screen.colors.Brown},  -- LineNr
-        [3] = {foreground = Screen.colors.Blue},  -- SpecialKey
-      })
-      screen:attach()
       command('set more')
     end)
 
     -- oldtest: Test_message_more()
     it('works', function()
+      screen = Screen.new(75, 6)
+      screen:set_default_attr_ids({
+        [1] = { bold = true, foreground = Screen.colors.SeaGreen }, -- MoreMsg
+        [2] = { foreground = Screen.colors.Brown }, -- LineNr
+      })
+
       command('call setline(1, range(1, 100))')
 
-      feed(':%p#\n')
+      feed(':%pfoo<C-H><C-H><C-H>#')
+      screen:expect([[
+        1                                                                          |
+        2                                                                          |
+        3                                                                          |
+        4                                                                          |
+        5                                                                          |
+        :%p#^                                                                       |
+      ]])
+      feed('\n')
       screen:expect([[
         {2:  1 }1                                                                      |
         {2:  2 }2                                                                      |
@@ -241,6 +325,18 @@ describe('messages', function()
         {1:Press ENTER or type command to continue}^                                    |
       ]])
 
+      -- A command line that doesn't print text is appended to scrollback,
+      -- even if it invokes a nested command line.
+      feed([[:<C-R>=':'<CR>:<CR>g<lt>]])
+      screen:expect([[
+        {2: 97 }97                                                                     |
+        {2: 98 }98                                                                     |
+        {2: 99 }99                                                                     |
+        {2:100 }100                                                                    |
+        :::                                                                        |
+        {1:Press ENTER or type command to continue}^                                    |
+      ]])
+
       feed(':%p#\n')
       screen:expect([[
         {2:  1 }1                                                                      |
@@ -292,25 +388,195 @@ describe('messages', function()
       ]])
     end)
 
+    -- oldtest: Test_echo_verbose_system()
+    it('verbose message before echo command', function()
+      screen = Screen.new(60, 10)
+
+      command('cd ' .. nvim_dir)
+      api.nvim_set_option_value('shell', './shell-test', {})
+      api.nvim_set_option_value('shellcmdflag', 'REP 20', {})
+      api.nvim_set_option_value('shellxquote', '', {}) -- win: avoid extra quotes
+
+      -- display a page and go back, results in exactly the same view
+      feed([[:4 verbose echo system('foo')<CR>]])
+      screen:expect([[
+        Executing command: "'./shell-test' 'REP' '20' 'foo'"        |
+                                                                    |
+        0: foo                                                      |
+        1: foo                                                      |
+        2: foo                                                      |
+        3: foo                                                      |
+        4: foo                                                      |
+        5: foo                                                      |
+        6: foo                                                      |
+        {6:-- More --}^                                                  |
+      ]])
+      feed('<Space>')
+      screen:expect([[
+        7: foo                                                      |
+        8: foo                                                      |
+        9: foo                                                      |
+        10: foo                                                     |
+        11: foo                                                     |
+        12: foo                                                     |
+        13: foo                                                     |
+        14: foo                                                     |
+        15: foo                                                     |
+        {6:-- More --}^                                                  |
+      ]])
+      feed('b')
+      screen:expect([[
+        Executing command: "'./shell-test' 'REP' '20' 'foo'"        |
+                                                                    |
+        0: foo                                                      |
+        1: foo                                                      |
+        2: foo                                                      |
+        3: foo                                                      |
+        4: foo                                                      |
+        5: foo                                                      |
+        6: foo                                                      |
+        {6:-- More --}^                                                  |
+      ]])
+
+      -- do the same with 'cmdheight' set to 2
+      feed('q')
+      command('set ch=2')
+      screen:expect([[
+        ^                                                            |
+        {1:~                                                           }|*7
+                                                                    |*2
+      ]])
+      feed([[:4 verbose echo system('foo')<CR>]])
+      screen:expect([[
+        Executing command: "'./shell-test' 'REP' '20' 'foo'"        |
+                                                                    |
+        0: foo                                                      |
+        1: foo                                                      |
+        2: foo                                                      |
+        3: foo                                                      |
+        4: foo                                                      |
+        5: foo                                                      |
+        6: foo                                                      |
+        {6:-- More --}^                                                  |
+      ]])
+      feed('<Space>')
+      screen:expect([[
+        7: foo                                                      |
+        8: foo                                                      |
+        9: foo                                                      |
+        10: foo                                                     |
+        11: foo                                                     |
+        12: foo                                                     |
+        13: foo                                                     |
+        14: foo                                                     |
+        15: foo                                                     |
+        {6:-- More --}^                                                  |
+      ]])
+      feed('b')
+      screen:expect([[
+        Executing command: "'./shell-test' 'REP' '20' 'foo'"        |
+                                                                    |
+        0: foo                                                      |
+        1: foo                                                      |
+        2: foo                                                      |
+        3: foo                                                      |
+        4: foo                                                      |
+        5: foo                                                      |
+        6: foo                                                      |
+        {6:-- More --}^                                                  |
+      ]])
+    end)
+
     -- oldtest: Test_quit_long_message()
     it('with control characters can be quit vim-patch:8.2.1844', function()
-      screen:try_resize(40, 6)
+      screen = Screen.new(40, 10)
+
       feed([[:echom range(9999)->join("\x01")<CR>]])
       screen:expect([[
-        0{3:^A}1{3:^A}2{3:^A}3{3:^A}4{3:^A}5{3:^A}6{3:^A}7{3:^A}8{3:^A}9{3:^A}10{3:^A}11{3:^A}12|
-        {3:^A}13{3:^A}14{3:^A}15{3:^A}16{3:^A}17{3:^A}18{3:^A}19{3:^A}20{3:^A}21{3:^A}22|
-        {3:^A}23{3:^A}24{3:^A}25{3:^A}26{3:^A}27{3:^A}28{3:^A}29{3:^A}30{3:^A}31{3:^A}32|
-        {3:^A}33{3:^A}34{3:^A}35{3:^A}36{3:^A}37{3:^A}38{3:^A}39{3:^A}40{3:^A}41{3:^A}42|
-        {3:^A}43{3:^A}44{3:^A}45{3:^A}46{3:^A}47{3:^A}48{3:^A}49{3:^A}50{3:^A}51{3:^A}52|
-        {1:-- More --}^                              |
+        0{18:^A}1{18:^A}2{18:^A}3{18:^A}4{18:^A}5{18:^A}6{18:^A}7{18:^A}8{18:^A}9{18:^A}10{18:^A}11{18:^A}12|
+        {18:^A}13{18:^A}14{18:^A}15{18:^A}16{18:^A}17{18:^A}18{18:^A}19{18:^A}20{18:^A}21{18:^A}22|
+        {18:^A}23{18:^A}24{18:^A}25{18:^A}26{18:^A}27{18:^A}28{18:^A}29{18:^A}30{18:^A}31{18:^A}32|
+        {18:^A}33{18:^A}34{18:^A}35{18:^A}36{18:^A}37{18:^A}38{18:^A}39{18:^A}40{18:^A}41{18:^A}42|
+        {18:^A}43{18:^A}44{18:^A}45{18:^A}46{18:^A}47{18:^A}48{18:^A}49{18:^A}50{18:^A}51{18:^A}52|
+        {18:^A}53{18:^A}54{18:^A}55{18:^A}56{18:^A}57{18:^A}58{18:^A}59{18:^A}60{18:^A}61{18:^A}62|
+        {18:^A}63{18:^A}64{18:^A}65{18:^A}66{18:^A}67{18:^A}68{18:^A}69{18:^A}70{18:^A}71{18:^A}72|
+        {18:^A}73{18:^A}74{18:^A}75{18:^A}76{18:^A}77{18:^A}78{18:^A}79{18:^A}80{18:^A}81{18:^A}82|
+        {18:^A}83{18:^A}84{18:^A}85{18:^A}86{18:^A}87{18:^A}88{18:^A}89{18:^A}90{18:^A}91{18:^A}92|
+        {6:-- More --}^                              |
       ]])
       feed('q')
       screen:expect([[
         ^                                        |
-        {0:~                                       }|
-        {0:~                                       }|
-        {0:~                                       }|
-        {0:~                                       }|
+        {1:~                                       }|*8
+                                                |
+      ]])
+    end)
+  end)
+
+  describe('mode is cleared when', function()
+    before_each(function()
+      screen = Screen.new(40, 6)
+    end)
+
+    -- oldtest: Test_mode_message_at_leaving_insert_by_ctrl_c()
+    it('leaving Insert mode with Ctrl-C vim-patch:8.1.1189', function()
+      exec([[
+        func StatusLine() abort
+          return ""
+        endfunc
+        set statusline=%!StatusLine()
+        set laststatus=2
+      ]])
+      feed('i')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*3
+        {3:                                        }|
+        {5:-- INSERT --}                            |
+      ]])
+      feed('<C-C>')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*3
+        {3:                                        }|
+                                                |
+      ]])
+    end)
+
+    -- oldtest: Test_mode_message_at_leaving_insert_with_esc_mapped()
+    it('leaving Insert mode with ESC in the middle of a mapping vim-patch:8.1.1192', function()
+      exec([[
+        set laststatus=2
+        inoremap <Esc> <Esc>00
+      ]])
+      feed('i')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*3
+        {3:[No Name]                               }|
+        {5:-- INSERT --}                            |
+      ]])
+      feed('<Esc>')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*3
+        {3:[No Name]                               }|
+                                                |
+      ]])
+    end)
+
+    -- oldtest: Test_mode_updated_after_ctrl_c()
+    it('pressing Ctrl-C in i_CTRL-O', function()
+      feed('i<C-O>')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*4
+        {5:-- (insert) --}                          |
+      ]])
+      feed('<C-C>')
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*4
                                                 |
       ]])
     end)
@@ -319,12 +585,6 @@ describe('messages', function()
   -- oldtest: Test_ask_yesno()
   it('y/n prompt works', function()
     screen = Screen.new(75, 6)
-    screen:set_default_attr_ids({
-      [0] = {bold = true, foreground = Screen.colors.Blue},  -- NonText
-      [1] = {bold = true, foreground = Screen.colors.SeaGreen},  -- MoreMsg
-      [2] = {bold = true, reverse = true},  -- MsgSeparator
-    })
-    screen:attach()
     command('set noincsearch nohlsearch inccommand=')
     command('call setline(1, range(1, 2))')
 
@@ -332,67 +592,80 @@ describe('messages', function()
     screen:expect([[
       1                                                                          |
       2                                                                          |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}^                                   |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}^                                   |
     ]])
     feed('n')
     screen:expect([[
       ^1                                                                          |
       2                                                                          |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}n                                  |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}n                                  |
     ]])
 
     feed(':2,1s/^/Esc/\n')
     screen:expect([[
       1                                                                          |
       2                                                                          |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}^                                   |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}^                                   |
     ]])
     feed('<Esc>')
     screen:expect([[
       ^1                                                                          |
       2                                                                          |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}n                                  |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}n                                  |
     ]])
 
     feed(':2,1s/^/y/\n')
     screen:expect([[
       1                                                                          |
       2                                                                          |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}^                                   |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}^                                   |
     ]])
     feed('y')
     screen:expect([[
       y1                                                                         |
       ^y2                                                                         |
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {0:~                                                                          }|
-      {1:Backwards range given, OK to swap (y/n)?}y                                  |
+      {1:~                                                                          }|*3
+      {6:Backwards range given, OK to swap (y/n)?}y                                  |
     ]])
+  end)
+
+  -- oldtest: Test_fileinfo_tabpage_cmdheight()
+  it("fileinfo works when 'cmdheight' has just decreased", function()
+    screen = Screen.new(40, 6)
+
+    exec([[
+      set shortmess-=o
+      set shortmess-=O
+      set shortmess-=F
+      tabnew
+      set cmdheight=2
+    ]])
+    screen:expect([[
+      {24: [No Name] }{5: [No Name] }{2:                 }{24:X}|
+      ^                                        |
+      {1:~                                       }|*2
+                                              |*2
+    ]])
+
+    feed(':tabprev | edit Xfileinfo.txt<CR>')
+    screen:expect([[
+      {5: Xfileinfo.txt }{24: [No Name] }{2:             }{24:X}|
+      ^                                        |
+      {1:~                                       }|*3
+      "Xfileinfo.txt" [New]                   |
+    ]])
+    assert_alive()
   end)
 
   -- oldtest: Test_fileinfo_after_echo()
   it('fileinfo does not overwrite echo message vim-patch:8.2.4156', function()
     screen = Screen.new(40, 6)
-    screen:set_default_attr_ids({
-      [0] = {bold = true, foreground = Screen.colors.Blue},  -- NonText
-    })
-    screen:attach()
+
     exec([[
       set shortmess-=F
 
@@ -406,16 +679,53 @@ describe('messages', function()
 
       autocmd CursorHold * buf b.txt | w | echo "'b' written"
     ]])
+
     command('set updatetime=50')
     feed('0$')
     screen:expect([[
       ^hi                                      |
-      {0:~                                       }|
-      {0:~                                       }|
-      {0:~                                       }|
-      {0:~                                       }|
+      {1:~                                       }|*4
       'b' written                             |
     ]])
     os.remove('b.txt')
+  end)
+
+  -- oldtest: Test_messagesopt_wait()
+  it('&messagesopt "wait"', function()
+    screen = Screen.new(45, 6)
+    command('set cmdheight=1')
+
+    -- Check hit-enter prompt
+    command('set messagesopt=hit-enter,history:500')
+    feed(":echo 'foo' | echo 'bar' | echo 'baz'\n")
+    screen:expect([[
+                                                   |
+      {3:                                             }|
+      foo                                          |
+      bar                                          |
+      baz                                          |
+      {6:Press ENTER or type command to continue}^      |
+    ]])
+    feed('<CR>')
+
+    -- Check no hit-enter prompt when "wait:" is set
+    command('set messagesopt=wait:500,history:500')
+    feed(":echo 'foo' | echo 'bar' | echo 'baz'\n")
+    screen:expect({
+      grid = [[
+                                                   |
+      {1:~                                            }|
+      {3:                                             }|
+      foo                                          |
+      bar                                          |
+      baz                                          |
+    ]],
+      timeout = 500,
+    })
+    screen:expect([[
+      ^                                             |
+      {1:~                                            }|*4
+                                                   |
+    ]])
   end)
 end)
